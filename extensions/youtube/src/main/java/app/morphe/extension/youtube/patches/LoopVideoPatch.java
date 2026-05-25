@@ -1,16 +1,74 @@
 package app.morphe.extension.youtube.patches;
 
 import app.morphe.extension.youtube.settings.Settings;
+import app.morphe.extension.youtube.videoplayer.LoopVideoButton;
 
 @SuppressWarnings("unused")
 public class LoopVideoPatch {
+
+    /** Range start in milliseconds. -1 means not set (full video loop). */
+    public static volatile long rangeStartMs = -1;
+
+    /** Range end in milliseconds. -1 means not set. */
+    public static volatile long rangeEndMs = -1;
+
+    /** Video ID at the time the range was set. Used to clear range when the video changes. */
+    private static volatile String rangeVideoId = "";
+
+    private static volatile long lastSeekTimeMs = 0;
+    private static final long SEEK_COOLDOWN_MS = 2000;
+
+    public static boolean isRangeActive() {
+        return rangeStartMs >= 0 && rangeEndMs > rangeStartMs;
+    }
+
+    public static void setRange(long startMs, long endMs) {
+        rangeStartMs = startMs;
+        rangeEndMs = endMs;
+        rangeVideoId = VideoInformation.getVideoId();
+    }
+
+    public static void clearRange() {
+        rangeStartMs = -1;
+        rangeEndMs = -1;
+        rangeVideoId = "";
+    }
+
     /**
-     * Injection point
+     * Injection point. Called ~once per second with the current video time in milliseconds.
+     */
+    public static void videoTimeChanged(long time) {
+        if (!Settings.LOOP_VIDEO.get() || !isRangeActive()) return;
+
+        // Clear range if the video has changed since it was set.
+        final String currentVideoId = VideoInformation.getVideoId();
+        if (!rangeVideoId.isEmpty() && !rangeVideoId.equals(currentVideoId)) {
+            clearRange();
+            LoopVideoButton.onRangeCleared();
+            return;
+        }
+
+        if (time < rangeEndMs) return;
+
+        final long now = System.currentTimeMillis();
+        if (now - lastSeekTimeMs < SEEK_COOLDOWN_MS) return;
+        lastSeekTimeMs = now;
+
+        VideoInformation.seekTo(rangeStartMs);
+    }
+
+    /**
+     * Injection point.
      */
     public static boolean shouldLoopVideo(Enum<?> status) {
-        boolean shouldLoop = status != null && "ENDED".equals(status.name())
+        boolean isEnded = status != null && "ENDED".equals(status.name())
                 && Settings.LOOP_VIDEO.get();
-        // Instead of calling a method to loop the video, just seek to 00:00.
-        return shouldLoop && VideoInformation.seekTo(0);
+        if (!isEnded) return false;
+
+        // Fallback: if the video truly ended while range is active (videoTimeChanged was too slow),
+        // seek to range start so the end screen is dismissed.
+        if (isRangeActive()) return VideoInformation.seekTo(rangeStartMs);
+
+        return VideoInformation.seekTo(0);
     }
 }
